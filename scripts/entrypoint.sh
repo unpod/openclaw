@@ -303,21 +303,6 @@ nginx
 rm -f /tmp/openclaw-gateway.lock 2>/dev/null || true
 rm -f "$STATE_DIR/gateway.lock" 2>/dev/null || true
 
-# ── Auto-approve device pairing requests (if enabled) ────────────────────────
-if [ "${OPENCLAW_AUTO_APPROVE_DEVICES:-true}" = "true" ]; then
-  echo "[entrypoint] device auto-approve enabled (background loop)"
-  (
-    # Wait for gateway to be ready
-    sleep 10
-    while true; do
-      # Approve the latest pending request (if any), silently
-      openclaw devices approve --latest --token "$GATEWAY_TOKEN" 2>/dev/null && \
-        echo "[auto-approve] approved pending device" || true
-      sleep 5
-    done
-  ) &
-fi
-
 # ── Start openclaw gateway ───────────────────────────────────────────────────
 echo "[entrypoint] starting openclaw gateway on port $GATEWAY_PORT..."
 
