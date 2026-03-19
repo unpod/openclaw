@@ -78,7 +78,7 @@ for key in ANTHROPIC_API_KEY OPENAI_API_KEY OPENROUTER_API_KEY GEMINI_API_KEY \
            XAI_API_KEY GROQ_API_KEY MISTRAL_API_KEY CEREBRAS_API_KEY \
            VENICE_API_KEY MOONSHOT_API_KEY KIMI_API_KEY MINIMAX_API_KEY \
            ZAI_API_KEY AI_GATEWAY_API_KEY OPENCODE_API_KEY OPENCODE_ZEN_API_KEY \
-           SYNTHETIC_API_KEY COPILOT_GITHUB_TOKEN XIAOMI_API_KEY; do
+           SYNTHETIC_API_KEY COPILOT_GITHUB_TOKEN XIAOMI_API_KEY LITELLM_API_KEY; do
   [ -n "${!key:-}" ] && HAS_PROVIDER=1 && break
 done
 [ -n "${AWS_ACCESS_KEY_ID:-}" ] && [ -n "${AWS_SECRET_ACCESS_KEY:-}" ] && HAS_PROVIDER=1
@@ -89,7 +89,8 @@ if [ "$HAS_PROVIDER" -eq 0 ]; then
   echo "[entrypoint] Set one of: ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY,"
   echo "[entrypoint]   XAI_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, CEREBRAS_API_KEY, VENICE_API_KEY,"
   echo "[entrypoint]   MOONSHOT_API_KEY, KIMI_API_KEY, MINIMAX_API_KEY, ZAI_API_KEY, AI_GATEWAY_API_KEY,"
-  echo "[entrypoint]   OPENCODE_API_KEY, SYNTHETIC_API_KEY, COPILOT_GITHUB_TOKEN, XIAOMI_API_KEY"
+  echo "[entrypoint]   OPENCODE_API_KEY, SYNTHETIC_API_KEY, COPILOT_GITHUB_TOKEN, XIAOMI_API_KEY,"
+  echo "[entrypoint]   LITELLM_API_KEY (LiteLLM Proxy)"
   echo "[entrypoint] Or: AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (Bedrock), OLLAMA_BASE_URL (local)"
   exit 1
 fi
@@ -301,6 +302,21 @@ nginx
 # ── Clean up stale lock files ────────────────────────────────────────────────
 rm -f /tmp/openclaw-gateway.lock 2>/dev/null || true
 rm -f "$STATE_DIR/gateway.lock" 2>/dev/null || true
+
+# ── Auto-approve device pairing requests (if enabled) ────────────────────────
+if [ "${OPENCLAW_AUTO_APPROVE_DEVICES:-true}" = "true" ]; then
+  echo "[entrypoint] device auto-approve enabled (background loop)"
+  (
+    # Wait for gateway to be ready
+    sleep 10
+    while true; do
+      # Approve the latest pending request (if any), silently
+      openclaw devices approve --latest --token "$GATEWAY_TOKEN" 2>/dev/null && \
+        echo "[auto-approve] approved pending device" || true
+      sleep 5
+    done
+  ) &
+fi
 
 # ── Start openclaw gateway ───────────────────────────────────────────────────
 echo "[entrypoint] starting openclaw gateway on port $GATEWAY_PORT..."

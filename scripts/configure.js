@@ -267,6 +267,63 @@ if (process.env.XIAOMI_API_KEY) {
   removeProvider("xiaomi", "Xiaomi", "XIAOMI_API_KEY");
 }
 
+// LiteLLM Proxy (OpenAI-compatible gateway)
+const litellmUrl = (process.env.LITELLM_BASE_URL || "").replace(/\/+$/, "");
+if (process.env.LITELLM_API_KEY) {
+  const litellmBase = litellmUrl || "http://localhost:4000";
+  console.log(`[configure] configuring LiteLLM provider (base: ${litellmBase})`);
+  ensure(config, "models", "providers");
+
+  // Discover models: explicit CSV > dynamic fetch > fallback default
+  let litellmModels = [];
+  if (process.env.LITELLM_MODELS) {
+    // Explicit model list from env var (CSV)
+    litellmModels = process.env.LITELLM_MODELS.split(",").map(s => {
+      const id = s.trim();
+      return { id, name: id, contextWindow: 200000 };
+    });
+    console.log(`[configure] LiteLLM models (from env): ${litellmModels.map(m => m.id).join(", ")}`);
+  } else {
+    // Dynamic discovery via /v1/models
+    try {
+      const { execSync } = require("child_process");
+      const raw = execSync(
+        `curl -sf -H "Authorization: Bearer ${process.env.LITELLM_API_KEY}" "${litellmBase}/v1/models"`,
+        { encoding: "utf8", timeout: 10000 }
+      );
+      const parsed = JSON.parse(raw);
+      if (parsed.data && Array.isArray(parsed.data)) {
+        litellmModels = parsed.data.map(m => ({
+          id: m.id,
+          name: m.id,
+          contextWindow: 200000,
+        }));
+        console.log(`[configure] LiteLLM models (discovered): ${litellmModels.map(m => m.id).join(", ")}`);
+      }
+    } catch (err) {
+      console.warn(`[configure] LiteLLM model discovery failed: ${err.message || err}`);
+    }
+  }
+
+  // Fallback: at least one default model so the provider is usable
+  if (litellmModels.length === 0) {
+    litellmModels = [{ id: "default", name: "Default", contextWindow: 128000 }];
+    console.log("[configure] LiteLLM using fallback model entry");
+  }
+
+  const litellmApiType = process.env.LITELLM_API_TYPE || "openai-completions";
+  console.log(`[configure] LiteLLM api type: ${litellmApiType}`);
+
+  config.models.providers.litellm = {
+    api: litellmApiType,
+    apiKey: process.env.LITELLM_API_KEY,
+    baseUrl: litellmBase,
+    models: litellmModels,
+  };
+} else {
+  removeProvider("litellm", "LiteLLM", "LITELLM_API_KEY");
+}
+
 // Amazon Bedrock (uses AWS credential chain)
 if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
   console.log("[configure] configuring Amazon Bedrock provider");
@@ -340,6 +397,7 @@ const primaryCandidates = [
   [process.env.ZAI_API_KEY,            "zai/glm-4.7"],
   [process.env.AI_GATEWAY_API_KEY,     "vercel-ai-gateway/anthropic/claude-opus-4.5"],
   [process.env.XIAOMI_API_KEY,         "xiaomi/mimo-v2-flash"],
+  [process.env.LITELLM_API_KEY,        `litellm/${process.env.LITELLM_PRIMARY_MODEL || "default"}`],
   [process.env.AWS_ACCESS_KEY_ID,      "amazon-bedrock/anthropic.claude-opus-4-5-20251101-v1:0"],
   [ollamaUrl,                          "ollama/llama3.3"],
 ];
@@ -609,6 +667,42 @@ if (process.env.BROWSER_CDP_URL) {
   console.log("[configure] browser configured (from custom JSON)");
 }
 
+// ── Allowed Origins (CORS for Control UI) ───────────────────────────────────
+if (process.env.OPENCLAW_ALLOWED_ORIGINS) {
+  let origins = [];
+  const rawValue = process.env.OPENCLAW_ALLOWED_ORIGINS.trim();
+
+  if (/^\s*\[/.test(rawValue)) {
+    // JSON array format
+    try {
+      const parsed = JSON.parse(rawValue);
+      if (!Array.isArray(parsed)) throw new Error("JSON value must be an array");
+      origins = parsed;
+    } catch (err) {
+      console.error("[configure] ERROR: OPENCLAW_ALLOWED_ORIGINS:", err.message);
+      console.error("[configure]   Expected: comma-separated URLs or JSON array");
+      console.error("[configure]   Example: 'http://localhost:5173,https://app.com'");
+      console.error("[configure]   Example: '[\"http://localhost:5173\"]'");
+      process.exit(1);
+    }
+  } else {
+    // CSV format
+    origins = rawValue.split(",").map(s => s.trim()).filter(Boolean);
+  }
+
+  // Auto-inject Coolify FQDN if running in a Coolify environment
+  const coolifyFqdn = process.env.COOLIFY_FQDN || process.env.COOLIFY_URL;
+  if (coolifyFqdn && !origins.includes(coolifyFqdn.replace(/\/+$/, ""))) {
+    origins.push(coolifyFqdn.replace(/\/+$/, ""));
+    console.log(`[configure] injected Coolify origin: ${coolifyFqdn}`);
+  }
+
+  if (origins.length > 0) {
+    ensure(config, "gateway", "controlUi");
+    config.gateway.controlUi.allowedOrigins = origins;
+    console.log(`[configure] allowed origins: ${JSON.stringify(origins)}`);
+  }
+}
 // ── Validate: at least one provider API key env var must be set ──────────────
 // All providers (built-in and custom) read API keys from env vars, not from JSON.
 const hasProvider =
@@ -619,6 +713,7 @@ const hasProvider =
   // Custom proxy providers also need env var keys
   !!process.env.VENICE_API_KEY || !!process.env.MINIMAX_API_KEY ||
   !!process.env.MOONSHOT_API_KEY || !!process.env.KIMI_API_KEY ||
+  !!process.env.LITELLM_API_KEY ||
   !!process.env.SYNTHETIC_API_KEY || !!process.env.XIAOMI_API_KEY;
 
 if (!hasProvider) {
@@ -628,6 +723,7 @@ if (!hasProvider) {
   console.error("[configure]   XAI_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, CEREBRAS_API_KEY, ZAI_API_KEY,");
   console.error("[configure]   AI_GATEWAY_API_KEY, OPENCODE_API_KEY, COPILOT_GITHUB_TOKEN, VENICE_API_KEY,");
   console.error("[configure]   MOONSHOT_API_KEY, KIMI_API_KEY, MINIMAX_API_KEY, SYNTHETIC_API_KEY, XIAOMI_API_KEY,");
+  console.error("[configure]   LITELLM_API_KEY (LiteLLM Proxy),");
   console.error("[configure]   AWS_ACCESS_KEY_ID+AWS_SECRET_ACCESS_KEY (Bedrock), or OLLAMA_BASE_URL (local)");
   process.exit(1);
 }
