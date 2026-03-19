@@ -24,8 +24,8 @@ on:
 env:
   GITHUB_REGISTRY: ghcr.io
   DOCKER_REGISTRY: docker.io
-  IMAGE_NAME: coollabsio/openclaw
-  BASE_IMAGE_NAME: coollabsio/openclaw-base
+  IMAGE_NAME: unpod/openclaw
+  BASE_IMAGE_NAME: unpod/openclaw-base
 
 jobs:
   check-release:
