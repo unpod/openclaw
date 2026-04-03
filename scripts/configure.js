@@ -7,6 +7,15 @@
 const fs = require("fs");
 const path = require("path");
 
+// ── Import Utilities ─────────────────────────────────────────────────────────
+const {
+  ENV_VAR,
+  EXIT_CODE,
+  coerceType,
+  parseArrayValue,
+  parseAllowedOrigins,
+} = require('./utils');
+
 const STATE_DIR = (process.env.OPENCLAW_STATE_DIR || "/data/.openclaw").replace(/\/+$/, "");
 const WORKSPACE_DIR = (process.env.OPENCLAW_WORKSPACE_DIR || "/data/workspace").replace(/\/+$/, "");
 const CONFIG_FILE = process.env.OPENCLAW_CONFIG_PATH || path.join(STATE_DIR, "openclaw.json");
@@ -21,8 +30,10 @@ fs.mkdirSync(STATE_DIR, { recursive: true });
 fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
 
 // Deep merge: source into target. Arrays are replaced, not concatenated.
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 function deepMerge(target, source) {
   for (const key of Object.keys(source)) {
+    if (UNSAFE_KEYS.has(key)) continue;
     if (
       source[key] && typeof source[key] === "object" && !Array.isArray(source[key]) &&
       target[key] && typeof target[key] === "object" && !Array.isArray(target[key])
@@ -382,7 +393,7 @@ const primaryCandidates = [
   [process.env.ANTHROPIC_API_KEY,      "anthropic/claude-opus-4-5-20251101"],
   [process.env.OPENAI_API_KEY,         "openai/gpt-5.2"],
   [process.env.OPENROUTER_API_KEY,     "openrouter/anthropic/claude-opus-4-5"],
-  [process.env.GEMINI_API_KEY,         "google/gemini-2.5-pro"],
+  [process.env.GEMINI_API_KEY,         "google/gemini-3-pro"],
   [opencodeKey,                        "opencode/claude-opus-4-5"],
   [process.env.COPILOT_GITHUB_TOKEN,   "github-copilot/claude-opus-4-5"],
   [process.env.XAI_API_KEY,            "xai/grok-3"],
@@ -667,34 +678,81 @@ if (process.env.BROWSER_CDP_URL) {
   console.log("[configure] browser configured (from custom JSON)");
 }
 
-// ── Allowed Origins (CORS for Control UI) ───────────────────────────────────
-if (process.env.OPENCLAW_ALLOWED_ORIGINS) {
-  let origins = [];
-  const rawValue = process.env.OPENCLAW_ALLOWED_ORIGINS.trim();
+// ── Dynamic Configuration (dot-notation, allowed origins, JSON) ─────────────
 
-  if (/^\s*\[/.test(rawValue)) {
-    // JSON array format
+/**
+ * Applies dot-notation environment variables to the config object.
+ * Format: OPENCLAW__path__to__key=value
+ * Arrays: suffix with [] and use comma-separated values
+ */
+function applyDotNotationEnvVars() {
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key?.startsWith(ENV_VAR.DOT_NOTATION_PREFIX) || !value) {
+      continue;
+    }
+
+    const isArray = key.endsWith(ENV_VAR.ARRAY_SUFFIX);
+    const pathPart = isArray
+      ? key.slice(ENV_VAR.DOT_NOTATION_PREFIX.length, -ENV_VAR.ARRAY_SUFFIX.length)
+      : key.slice(ENV_VAR.DOT_NOTATION_PREFIX.length);
+
+    const pathSegments = pathPart.split('__').filter(Boolean);
+    if (pathSegments.length === 0) {
+      continue;
+    }
+
+    // Guard against prototype pollution
+    if (pathSegments.some(s => UNSAFE_KEYS.has(s))) {
+      console.warn(`[configure] dot-notation: skipping unsafe key in ${key}`);
+      continue;
+    }
+
+    // Navigate/create nested path
+    let target = config;
+    for (let i = 0; i < pathSegments.length - 1; i++) {
+      const segment = pathSegments[i];
+      if (!target[segment] || typeof target[segment] !== 'object' || Array.isArray(target[segment])) {
+        target[segment] = {};
+      }
+      target = target[segment];
+    }
+
+    const finalKey = pathSegments[pathSegments.length - 1];
+    target[finalKey] = isArray ? parseArrayValue(value) : coerceType(value);
+
+    console.log(
+      `[configure] dot-notation: ${key} → ${pathSegments.join('.')}${isArray ? ' (array)' : ''}`
+    );
+  }
+}
+
+/**
+ * Applies allowed origins configuration from environment variable.
+ */
+function applyAllowedOrigins() {
+  let origins = [];
+
+  const rawValue = process.env.OPENCLAW_ALLOWED_ORIGINS?.trim();
+  if (rawValue) {
     try {
-      const parsed = JSON.parse(rawValue);
-      if (!Array.isArray(parsed)) throw new Error("JSON value must be an array");
-      origins = parsed;
-    } catch (err) {
-      console.error("[configure] ERROR: OPENCLAW_ALLOWED_ORIGINS:", err.message);
-      console.error("[configure]   Expected: comma-separated URLs or JSON array");
+      origins = parseAllowedOrigins(rawValue);
+    } catch (error) {
+      console.error('[configure] ERROR: OPENCLAW_ALLOWED_ORIGINS:', error.message);
+      console.error('[configure]   Expected: comma-separated URLs or JSON array');
       console.error("[configure]   Example: 'http://localhost:5173,https://app.com'");
       console.error("[configure]   Example: '[\"http://localhost:5173\"]'");
-      process.exit(1);
+      process.exit(EXIT_CODE.INVALID_CONFIG);
     }
-  } else {
-    // CSV format
-    origins = rawValue.split(",").map(s => s.trim()).filter(Boolean);
   }
 
-  // Auto-inject Coolify FQDN if running in a Coolify environment
-  const coolifyFqdn = process.env.COOLIFY_FQDN || process.env.COOLIFY_URL;
-  if (coolifyFqdn && !origins.includes(coolifyFqdn.replace(/\/+$/, ""))) {
-    origins.push(coolifyFqdn.replace(/\/+$/, ""));
-    console.log(`[configure] injected Coolify origin: ${coolifyFqdn}`);
+  // Automatically inject Coolify's FQDN if we are running in a Coolify environment
+  const rawFqdn = process.env.COOLIFY_FQDN || process.env.COOLIFY_URL;
+  if (rawFqdn) {
+    const cleanFqdn = rawFqdn.replace(/\/+$/, "");
+    if (cleanFqdn && !origins.includes(cleanFqdn)) {
+      origins.push(cleanFqdn);
+      console.log(`[configure] injected Coolify origin: ${cleanFqdn}`);
+    }
   }
 
   if (origins.length > 0) {
@@ -703,6 +761,37 @@ if (process.env.OPENCLAW_ALLOWED_ORIGINS) {
     console.log(`[configure] allowed origins: ${JSON.stringify(origins)}`);
   }
 }
+
+/**
+ * Applies JSON configuration from environment variable.
+ * Parsed AFTER dot-notation vars, so it can override them.
+ */
+function applyJsonConfig() {
+  const rawValue = process.env.OPENCLAW_CONFIG_JSON;
+  if (!rawValue) {
+    return;
+  }
+
+  try {
+    const jsonConfig = JSON.parse(rawValue);
+
+    if (typeof jsonConfig !== 'object' || jsonConfig === null || Array.isArray(jsonConfig)) {
+      throw new Error('must be a JSON object (not an array or primitive)');
+    }
+
+    deepMerge(config, jsonConfig);
+    console.log('[configure] merged OPENCLAW_CONFIG_JSON');
+  } catch (error) {
+    console.error('[configure] ERROR: OPENCLAW_CONFIG_JSON:', error.message);
+    process.exit(EXIT_CODE.INVALID_CONFIG);
+  }
+}
+
+// ── Execute Configuration Parsers ───────────────────────────────────────────
+
+applyDotNotationEnvVars();
+applyAllowedOrigins();
+applyJsonConfig();
 // ── Validate: at least one provider API key env var must be set ──────────────
 // All providers (built-in and custom) read API keys from env vars, not from JSON.
 const hasProvider =
